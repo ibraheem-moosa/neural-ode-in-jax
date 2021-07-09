@@ -50,13 +50,13 @@ class CNF(linen.Module):
         logp_z = states[1]
 
         batchsize = z.shape[0]
-        W, B, U = HyperNetwork(in_out_dim, hidden_dim, width)(t)
-        Z = torch.unsqueeze(z, 0).repeat(self.width, 1, 1)
+        W, B, U = HyperNetwork(self.in_out_dim, self.hidden_dim, self.width)(t)
+        Z = jnp.expand_dims(z, 0).tile((self.width, 1, 1))
         h = jnp.tanh(jnp.matmul(Z, W) + B)
         dz_dt = jnp.matmul(h, U).mean(0)
-        dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
+        # dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
 
-        return (dz_dt, dlogp_z_dt)
+        return dz_dt#, dlogp_z_dt)
 
 
 def trace_df_dz(f, z):
@@ -65,9 +65,10 @@ def trace_df_dz(f, z):
     """
     sum_diag = 0.
     for i in range(z.shape[1]):
-        sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0].contiguous()[:, i].contiguous()
+        f_i = f[:, i]
+        sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0][:, i]
 
-    return sum_diag.contiguous()
+    return sum_diag
 
 
 class HyperNetwork(linen.Module):
@@ -136,7 +137,7 @@ if __name__ == '__main__':
                           if torch.cuda.is_available() else 'cpu')
 
     # model
-    func = CNF(in_out_dim=2, hidden_dim=args.hidden_dim, width=args.width).to(device)
+    func = CNF(in_out_dim=2, hidden_dim=args.hidden_dim, width=args.width)
     optimizer = optim.Adam(func.parameters(), lr=args.lr)
     p_z0 = torch.distributions.MultivariateNormal(
         loc=torch.tensor([0.0, 0.0]).to(device),
@@ -163,7 +164,7 @@ if __name__ == '__main__':
             z_t, logp_diff_t = odeint(
                 func,
                 (x, logp_diff_t1),
-                torch.tensor([t1, t0]).type(torch.float32).to(device),
+                jnp.array([t1, t0], dtype=jnp.float32),
                 atol=1e-5,
                 rtol=1e-5,
                 method='dopri5',
