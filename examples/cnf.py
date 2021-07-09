@@ -44,6 +44,13 @@ class CNF(linen.Module):
     https://gist.github.com/rtqichen/91924063aa4cc95e7ef30b3a5491cc52
     """
 
+    def _test_func(z, W, B, U, width, i):
+        Z = jnp.expand_dims(z, 0).tile((width, 1, 1))
+        h = jnp.tanh(jnp.matmul(Z, W) + B)
+        dz_dt = jnp.matmul(h, U).mean(0)
+        return dz_dt[:, i].sum(0)
+
+
     @linen.compact
     def __call__(self, t, states):
         z = states[0]
@@ -54,11 +61,16 @@ class CNF(linen.Module):
         Z = jnp.expand_dims(z, 0).tile((self.width, 1, 1))
         h = jnp.tanh(jnp.matmul(Z, W) + B)
         dz_dt = jnp.matmul(h, U).mean(0)
+        test_func_grad = jax.grad(CNF._test_func)
+        sum_diag = 0
+        for i in range(z.shape[1]):
+            sum_diag = test_func_grad(z, W, B, U, self.width, 0)[:, i]
         # dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
+        dlogp_z_dt = sum_diag
 
-        return dz_dt#, dlogp_z_dt)
+        return (dz_dt, dlogp_z_dt)
 
-
+"""
 def trace_df_dz(f, z):
     """Calculates the trace of the Jacobian df/dz.
     Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
@@ -66,10 +78,10 @@ def trace_df_dz(f, z):
     sum_diag = 0.
     for i in range(z.shape[1]):
         f_i = f[:, i]
-        sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0][:, i]
+        sum_diag += jax.grad(f[:, i].sum(), z, create_graph=True)[0][:, i]
 
     return sum_diag
-
+"""
 
 class HyperNetwork(linen.Module):
     in_out_dim: int
@@ -133,18 +145,24 @@ def get_batch(num_samples):
 if __name__ == '__main__':
     t0 = 0
     t1 = 10
-    device = torch.device('cuda:' + str(args.gpu)
-                          if torch.cuda.is_available() else 'cpu')
 
     # model
-    func = CNF(in_out_dim=2, hidden_dim=args.hidden_dim, width=args.width)
-    optimizer = optim.Adam(func.parameters(), lr=args.lr)
+    cnf = CNF(in_out_dim=2, hidden_dim=args.hidden_dim, width=args.width)
+    cnf_params = cnf.init(jax.random.PRNGKey(0), jnp.array([0]), (jnp.ones((args.num_samples, 2)), jnp.ones((args.num_samples, 1))))
+    optimizer = optax.adam(learning_rate=args.lr)
+    optimizer.init(cnf_params)
+
+    p_z0_mean = jnp.zeros((2,))
+    p_z0_covariance_matrix = jnp.array([[0.1, 0.0], [0.0, 0.1]]) 
+    """
     p_z0 = torch.distributions.MultivariateNormal(
         loc=torch.tensor([0.0, 0.0]).to(device),
         covariance_matrix=torch.tensor([[0.1, 0.0], [0.0, 0.1]]).to(device)
     )
+    """
     loss_meter = RunningAverageMeter()
 
+    """
     if args.train_dir is not None:
         if not os.path.exists(args.train_dir):
             os.makedirs(args.train_dir)
@@ -154,15 +172,12 @@ if __name__ == '__main__':
             func.load_state_dict(checkpoint['func_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             print('Loaded ckpt from {}'.format(ckpt_path))
+    """
 
     try:
-        for itr in range(1, args.niters + 1):
-            optimizer.zero_grad()
-
-            x, logp_diff_t1 = get_batch(args.num_samples)
-
+        def loss(x, logp_diff_t1):
             z_t, logp_diff_t = odeint(
-                func,
+                cnf,
                 (x, logp_diff_t1),
                 jnp.array([t1, t0], dtype=jnp.float32),
                 atol=1e-5,
@@ -171,8 +186,18 @@ if __name__ == '__main__':
             )
 
             z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+            # logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
+            logp_x = jax.scipy.stats.multivariate_normal.log_pdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_diff_t0.reshape(-1)
+            return -logp_x.mean(0)
 
-            logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
+        for itr in range(1, args.niters + 1):
+
+            x, logp_diff_t1 = get_batch(args.num_samples)
+
+            z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+
+            logp_x = jax.scipy.stats.multivariate_normal.log_pdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_diff_t0.view(-1)
+            # logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
             loss = -logp_x.mean(0)
 
             loss.backward()
