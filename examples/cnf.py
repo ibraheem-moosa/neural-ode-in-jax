@@ -58,27 +58,6 @@ class CNF(linen.Module):
 
         return (dz_dt, dlogp_z_dt)
 
-    
-    def forward(self, t, states):
-        z = states[0]
-        logp_z = states[1]
-
-        batchsize = z.shape[0]
-
-        with torch.set_grad_enabled(True):
-            z.requires_grad_(True)
-
-            W, B, U = self.hyper_net(t)
-
-            Z = torch.unsqueeze(z, 0).repeat(self.width, 1, 1)
-
-            h = torch.tanh(torch.matmul(Z, W) + B)
-            dz_dt = torch.matmul(h, U).mean(0)
-
-            dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
-
-        return (dz_dt, dlogp_z_dt)
-
 
 def trace_df_dz(f, z):
     """Calculates the trace of the Jacobian df/dz.
@@ -144,8 +123,8 @@ class RunningAverageMeter(object):
 
 def get_batch(num_samples):
     points, _ = make_circles(n_samples=num_samples, noise=0.06, factor=0.5)
-    x = torch.tensor(points).type(torch.float32).to(device)
-    logp_diff_t1 = torch.zeros(num_samples, 1).type(torch.float32).to(device)
+    x = jnp.array(points, dtype=jnp.float32)
+    logp_diff_t1 = jnp.zeros((num_samples, 1), dtype=jnp.float32)
 
     return(x, logp_diff_t1)
 
