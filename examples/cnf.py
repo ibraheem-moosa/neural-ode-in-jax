@@ -7,10 +7,15 @@ import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 from sklearn.datasets import make_circles
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
+from typing import Any, Callable, Sequence, Optional
+import jax
+from jax import lax, random, numpy as jnp
+import flax
+from flax import linen
+from flax.core import freeze, unfreeze
+from flax.training import train_state
+from flax import serialization
+import optax
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', action='store_true')
@@ -31,17 +36,29 @@ else:
     from torchdiffeq import odeint
 
 
-class CNF(nn.Module):
+class CNF(linen.Module):
+    in_out_dim: int
+    hidden_dim: int
+    width: int
     """Adapted from the NumPy implementation at:
     https://gist.github.com/rtqichen/91924063aa4cc95e7ef30b3a5491cc52
     """
-    def __init__(self, in_out_dim, hidden_dim, width):
-        super().__init__()
-        self.in_out_dim = in_out_dim
-        self.hidden_dim = hidden_dim
-        self.width = width
-        self.hyper_net = HyperNetwork(in_out_dim, hidden_dim, width)
 
+    @linen.compact
+    def __call__(self, t, states):
+        z = states[0]
+        logp_z = states[1]
+
+        batchsize = z.shape[0]
+        W, B, U = HyperNetwork(in_out_dim, hidden_dim, width)(t)
+        Z = torch.unsqueeze(z, 0).repeat(self.width, 1, 1)
+        h = jnp.tanh(jnp.matmul(Z, W) + B)
+        dz_dt = jnp.matmul(h, U).mean(0)
+        dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
+
+        return (dz_dt, dlogp_z_dt)
+
+    
     def forward(self, t, states):
         z = states[0]
         logp_z = states[1]
@@ -74,43 +91,35 @@ def trace_df_dz(f, z):
     return sum_diag.contiguous()
 
 
-class HyperNetwork(nn.Module):
+class HyperNetwork(linen.Module):
+    in_out_dim: int
+    hidden_dim: int
+    width: int
     """Hyper-network allowing f(z(t), t) to change with time.
 
     Adapted from the NumPy implementation at:
     https://gist.github.com/rtqichen/91924063aa4cc95e7ef30b3a5491cc52
     """
-    def __init__(self, in_out_dim, hidden_dim, width):
-        super().__init__()
 
-        blocksize = width * in_out_dim
-
-        self.fc1 = nn.Linear(1, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, 3 * blocksize + width)
-
-        self.in_out_dim = in_out_dim
-        self.hidden_dim = hidden_dim
-        self.width = width
-        self.blocksize = blocksize
-
-    def forward(self, t):
+    @linen.compact
+    def __call__(self, t):
+        blocksize = self.width * self.in_out_dim
         # predict params
         params = t.reshape(1, 1)
-        params = torch.tanh(self.fc1(params))
-        params = torch.tanh(self.fc2(params))
-        params = self.fc3(params)
+        params = jnp.tanh(linen.Dense(self.hidden_dim)(params))
+        params = jnp.tanh(linen.Dense(self.hidden_dim)(params))
+        params = linen.Dense(3 * blocksize + self.width)(params)
 
         # restructure
         params = params.reshape(-1)
-        W = params[:self.blocksize].reshape(self.width, self.in_out_dim, 1)
+        W = params[:blocksize].reshape(self.width, self.in_out_dim, 1)
 
-        U = params[self.blocksize:2 * self.blocksize].reshape(self.width, 1, self.in_out_dim)
+        U = params[blocksize:2 * blocksize].reshape(self.width, 1, self.in_out_dim)
 
-        G = params[2 * self.blocksize:3 * self.blocksize].reshape(self.width, 1, self.in_out_dim)
-        U = U * torch.sigmoid(G)
+        G = params[2 * blocksize:3 * blocksize].reshape(self.width, 1, self.in_out_dim)
+        U = U * jax.nn.sigmoid(G)
 
-        B = params[3 * self.blocksize:].reshape(self.width, 1, 1)
+        B = params[3 * blocksize:].reshape(self.width, 1, 1)
         return [W, B, U]
 
 
