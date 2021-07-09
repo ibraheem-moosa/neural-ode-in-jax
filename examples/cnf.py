@@ -16,6 +16,8 @@ from flax.core import freeze, unfreeze
 from flax.training import train_state
 from flax import serialization
 import optax
+import sys
+sys.path.append('.')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', action='store_true')
@@ -70,18 +72,6 @@ class CNF(linen.Module):
 
         return (dz_dt, dlogp_z_dt)
 
-"""
-def trace_df_dz(f, z):
-    """Calculates the trace of the Jacobian df/dz.
-    Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
-    """
-    sum_diag = 0.
-    for i in range(z.shape[1]):
-        f_i = f[:, i]
-        sum_diag += jax.grad(f[:, i].sum(), z, create_graph=True)[0][:, i]
-
-    return sum_diag
-"""
 
 class HyperNetwork(linen.Module):
     in_out_dim: int
@@ -148,10 +138,6 @@ if __name__ == '__main__':
 
     # model
     cnf = CNF(in_out_dim=2, hidden_dim=args.hidden_dim, width=args.width)
-    cnf_params = cnf.init(jax.random.PRNGKey(0), jnp.array([0]), (jnp.ones((args.num_samples, 2)), jnp.ones((args.num_samples, 1))))
-    optimizer = optax.adam(learning_rate=args.lr)
-    optimizer.init(cnf_params)
-
     p_z0_mean = jnp.zeros((2,))
     p_z0_covariance_matrix = jnp.array([[0.1, 0.0], [0.0, 0.1]]) 
     """
@@ -175,7 +161,8 @@ if __name__ == '__main__':
     """
 
     try:
-        def loss(x, logp_diff_t1):
+        def loss(params, batch):
+            x, logp_diff_t1 = batch
             z_t, logp_diff_t = odeint(
                 cnf,
                 (x, logp_diff_t1),
@@ -190,20 +177,18 @@ if __name__ == '__main__':
             logp_x = jax.scipy.stats.multivariate_normal.log_pdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_diff_t0.reshape(-1)
             return -logp_x.mean(0)
 
+        cnf_params = cnf.init(jax.random.PRNGKey(0), jnp.array([0]), (jnp.ones((args.num_samples, 2)), jnp.ones((args.num_samples, 1))))
+        x, logp_diff_t1 = get_batch(args.num_samples)
+        optimizer = optax.adam(learning_rate=args.lr)
+        optimizer.init(cnf_params)
+        loss_grad_fn = jax.value_and_grad(loss)
+
         for itr in range(1, args.niters + 1):
-
             x, logp_diff_t1 = get_batch(args.num_samples)
-
-            z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
-
-            logp_x = jax.scipy.stats.multivariate_normal.log_pdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_diff_t0.view(-1)
-            # logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
-            loss = -logp_x.mean(0)
-
-            loss.backward()
-            optimizer.step()
-
-            loss_meter.update(loss.item())
+            loss_val, grads = loss_grad_fn(cnf_params, (x, logp_diff_t1))
+            updates, opt_state = optimizer.update(grads, opt_state)
+            params = optax.apply_updates(cnf_params, updates)
+            loss_meter.update(loss_val.item())
 
             print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
 
