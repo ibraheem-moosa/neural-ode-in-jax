@@ -119,17 +119,16 @@ def _tuple_tol(name, tol, shapes):
 
 
 def _flat_to_shape(tensor, length, shapes):
-    print(tensor.shape, length, shapes)
-    tensor = torch.tensor(tensor)
-    shapes = torch.tensor(shapes)
+    print(tensor)
+    tensor = torch.tensor(np.array(tensor))
     tensor_list = []
     total = 0
     for shape in shapes:
-        next_total = total + shape.numel()
-        print(next_total, shape)
+        next_total = total + math.prod(shape)
         # It's important that this be view((...)), not view(...). Else when length=(), shape=() it fails.
         tensor_list.append(tensor[..., total:next_total].view((*length, *shape)))
         total = next_total
+    tensor_list = [jnp.array(tensor) for tensor in tensor_list]
     return tuple(tensor_list)
 
 
@@ -146,7 +145,7 @@ class _TupleFunc(torch.nn.Module):
 def tuple_func(base_func, shapes):
     def func(t, y):
         f = base_func(t, _flat_to_shape(y, (), shapes))
-        return jnp.array(torch.cat([f_.reshape(-1) for f_ in f]))
+        return jnp.array(jnp.concatenate([f_.reshape(-1) for f_ in f]))
     return func
 
 class _TupleInputOnlyFunc(torch.nn.Module):

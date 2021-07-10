@@ -32,10 +32,14 @@ parser.add_argument('--train_dir', type=str, default=None)
 parser.add_argument('--results_dir', type=str, default="./results")
 args = parser.parse_args()
 
+"""
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
 else:
     from torchdiffeq import odeint
+    """
+
+from easy_neural_ode.ode import odeint
 
 # from jax.experimental.ode import odeint
 
@@ -57,8 +61,7 @@ class CNF(linen.Module):
 
     @linen.compact
     def __call__(self, t, states):
-        z = states[0]
-        logp_z = states[1]
+        z, logp_z = states
 
         batchsize = z.shape[0]
         W, B, U = HyperNetwork(self.in_out_dim, self.hidden_dim, self.width)(t)
@@ -166,6 +169,7 @@ if __name__ == '__main__':
         def loss(params, batch):
             x, logp_diff_t1 = batch
             def cnf_func(t, states):
+                print(states)
                 return cnf.apply(params, t, states)
             z_t, logp_diff_t = odeint(
                 cnf_func,
@@ -173,7 +177,6 @@ if __name__ == '__main__':
                 jnp.array([t1, t0], dtype=jnp.float32),
                 atol=1e-5,
                 rtol=1e-5,
-                method='scipy_solver'
             )
 
             z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
