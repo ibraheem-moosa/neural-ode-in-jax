@@ -2,6 +2,7 @@ from enum import Enum
 import math
 import numpy as np
 import torch
+import jax.numpy as jnp
 import warnings
 from .event_handling import combine_event_functions
 
@@ -118,10 +119,14 @@ def _tuple_tol(name, tol, shapes):
 
 
 def _flat_to_shape(tensor, length, shapes):
+    print(tensor.shape, length, shapes)
+    tensor = torch.tensor(tensor)
+    shapes = torch.tensor(shapes)
     tensor_list = []
     total = 0
     for shape in shapes:
         next_total = total + shape.numel()
+        print(next_total, shape)
         # It's important that this be view((...)), not view(...). Else when length=(), shape=() it fails.
         tensor_list.append(tensor[..., total:next_total].view((*length, *shape)))
         total = next_total
@@ -136,8 +141,13 @@ class _TupleFunc(torch.nn.Module):
 
     def forward(self, t, y):
         f = self.base_func(t, _flat_to_shape(y, (), self.shapes))
-        return torch.cat([f_.reshape(-1) for f_ in f])
+        return jnp.array(torch.cat([f_.reshape(-1) for f_ in f]))
 
+def tuple_func(base_func, shapes):
+    def func(t, y):
+        f = base_func(t, _flat_to_shape(y, (), shapes))
+        return jnp.array(torch.cat([f_.reshape(-1) for f_ in f]))
+    return func
 
 class _TupleInputOnlyFunc(torch.nn.Module):
     def __init__(self, base_func, shapes):
@@ -148,6 +158,11 @@ class _TupleInputOnlyFunc(torch.nn.Module):
     def forward(self, t, y):
         return self.base_func(t, _flat_to_shape(y, (), self.shapes))
 
+def tuple_input_only_func(func, shapes):
+    return lambda t, y: func(t, _flat_to_shape(y, (), shapes))
+
+def reverse_func(func, mul=1.0):
+    return lambda t, y: mul * func(-t, y)
 
 class _ReverseFunc(torch.nn.Module):
     def __init__(self, base_func, mul=1.0):
@@ -200,17 +215,19 @@ def _check_inputs(func, y0, t, rtol, atol, method, options, event_fn, SOLVERS):
 
     # Normalise to tensor (non-tupled) input
     shapes = None
-    is_tuple = not isinstance(y0, torch.Tensor)
+    is_tuple = isinstance(y0, tuple)
     if is_tuple:
-        assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
+        # assert isinstance(y0, tuple), 'y0 must be either a torch.Tensor or a tuple'
         shapes = [y0_.shape for y0_ in y0]
         rtol = _tuple_tol('rtol', rtol, shapes)
         atol = _tuple_tol('atol', atol, shapes)
-        y0 = torch.cat([y0_.reshape(-1) for y0_ in y0])
-        func = _TupleFunc(func, shapes)
+        rtol = jnp.array(rtol)
+        atol = jnp.array(atol)
+        y0 = jnp.concatenate([y0_.reshape(-1) for y0_ in y0])
+        func = tuple_func(func, shapes)
         if event_fn is not None:
-            event_fn = _TupleInputOnlyFunc(event_fn, shapes)
-    _assert_floating('y0', y0)
+            event_fn = tuple_input_only_func(event_fn, shapes)
+    # _assert_floating('y0', y0)
 
     # Normalise method and options
     if options is None:
@@ -255,7 +272,7 @@ def _check_inputs(func, y0, t, rtol, atol, method, options, event_fn, SOLVERS):
             options['norm'] = _rms_norm
 
     # Normalise time
-    _check_timelike('t', t, True)
+    # _check_timelike('t', t, True)
     t_is_reversed = False
     if len(t) > 1 and t[0] > t[1]:
         t_is_reversed = True
@@ -266,9 +283,9 @@ def _check_inputs(func, y0, t, rtol, atol, method, options, event_fn, SOLVERS):
         t = -t
 
         # Ensure time values are un-negated when calling functions.
-        func = _ReverseFunc(func, mul=-1.0)
+        func = reverse_func(func, mul=-1.0)
         if event_fn is not None:
-            event_fn = _ReverseFunc(event_fn)
+            event_fn = reverse_func(event_fn)
 
         # For fixed step solvers.
         try:
@@ -292,13 +309,13 @@ def _check_inputs(func, y0, t, rtol, atol, method, options, event_fn, SOLVERS):
         assert not atol.requires_grad, "atol cannot require gradient"
 
     # Backward compatibility: Allow t and y0 to be on different devices
-    if t.device != y0.device:
-        warnings.warn("t is not on the same device as y0. Coercing to y0.device.")
-        t = t.to(y0.device)
+    # if t.device != y0.device:
+    #     warnings.warn("t is not on the same device as y0. Coercing to y0.device.")
+    #     t = t.to(y0.device)
     # ~Backward compatibility
 
     # Add perturb argument to func.
-    func = _PerturbFunc(func)
+    # func = _PerturbFunc(func)
 
     return shapes, func, y0, t, rtol, atol, method, options, event_fn, t_is_reversed
 
@@ -332,8 +349,8 @@ def np_nextafter(x1, x2):
 
 
 def _check_timelike(name, timelike, can_grad):
-    assert isinstance(timelike, torch.Tensor), '{} must be a torch.Tensor'.format(name)
-    _assert_floating(name, timelike)
+    # assert isinstance(timelike, torch.Tensor), '{} must be a torch.Tensor'.format(name)
+    # _assert_floating(name, timelike)
     assert timelike.ndimension() == 1, "{} must be one dimensional".format(name)
     if not can_grad:
         assert not timelike.requires_grad, "{} cannot require gradient".format(name)

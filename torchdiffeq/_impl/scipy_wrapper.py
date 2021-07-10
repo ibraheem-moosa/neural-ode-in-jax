@@ -1,5 +1,5 @@
 import abc
-import torch
+import numpy as np
 from scipy.integrate import solve_ivp
 from .misc import _handle_unused_kwargs
 
@@ -16,16 +16,17 @@ class ScipyWrapperODESolver(metaclass=abc.ABCMeta):
         self.dtype = y0.dtype
         self.device = y0.device
         self.shape = y0.shape
-        self.y0 = y0.detach().cpu().numpy().reshape(-1)
+        self.y0 = np.array(y0).reshape(-1)
         self.rtol = rtol
         self.atol = atol
         self.solver = solver
-        self.func = convert_func_to_numpy(func, self.shape, self.device, self.dtype)
+        self.func = func
+        # self.func = convert_func_to_numpy(func, self.shape, self.device, self.dtype)
 
     def integrate(self, t):
-        if t.numel() == 1:
-            return torch.tensor(self.y0)[None].to(self.device, self.dtype)
-        t = t.detach().cpu().numpy()
+        # if t.numel() == 1:
+        #     return torch.tensor(self.y0)[None].to(self.device, self.dtype)
+        t = np.array(t)
         sol = solve_ivp(
             self.func,
             t_span=[t.min(), t.max()],

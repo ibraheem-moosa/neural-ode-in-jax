@@ -37,6 +37,8 @@ if args.adjoint:
 else:
     from torchdiffeq import odeint
 
+# from jax.experimental.ode import odeint
+
 
 class CNF(linen.Module):
     in_out_dim: int
@@ -163,13 +165,15 @@ if __name__ == '__main__':
     try:
         def loss(params, batch):
             x, logp_diff_t1 = batch
+            def cnf_func(t, states):
+                return cnf.apply(params, t, states)
             z_t, logp_diff_t = odeint(
-                cnf,
+                cnf_func,
                 (x, logp_diff_t1),
                 jnp.array([t1, t0], dtype=jnp.float32),
                 atol=1e-5,
                 rtol=1e-5,
-                method='dopri5',
+                method='scipy_solver'
             )
 
             z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
