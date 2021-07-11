@@ -16,6 +16,7 @@ from flax.core import freeze, unfreeze
 from flax.training import train_state
 from flax import serialization
 import optax
+from functools import partial
 import sys
 sys.path.append('.')
 
@@ -23,7 +24,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', action='store_true')
 parser.add_argument('--viz', action='store_true')
 parser.add_argument('--niters', type=int, default=1000)
-parser.add_argument('--lr', type=float, default=1e-3)
+parser.add_argument('--lr', type=float, default=1e-5)
 parser.add_argument('--num_samples', type=int, default=512)
 parser.add_argument('--width', type=int, default=64)
 parser.add_argument('--hidden_dim', type=int, default=32)
@@ -39,43 +40,36 @@ else:
     from torchdiffeq import odeint
     """
 
-from easy_neural_ode.ode import odeint
+# from easy_neural_ode.ode import odeint
 
-# from jax.experimental.ode import odeint
+from jax.experimental.ode import odeint
 
+
+class DZDT(linen.Module):
+    in_out_dim: int
+    width: int
+
+    @linen.compact
+    def __call__(self, Z, t):
+        params = jnp.hstack([Z, t])
+        params = jnp.tanh(linen.Dense(self.width)(params))
+        params = jnp.tanh(linen.Dense(self.width)(params))
+        params = linen.Dense(self.in_out_dim)(params)
+        return params
 
 class CNF(linen.Module):
     in_out_dim: int
-    hidden_dim: int
     width: int
-    """Adapted from the NumPy implementation at:
-    https://gist.github.com/rtqichen/91924063aa4cc95e7ef30b3a5491cc52
-    """
 
-    def _test_func(z, W, B, U, width, i):
-        Z = jnp.expand_dims(z, 0).tile((width, 1, 1))
-        h = jnp.tanh(jnp.matmul(Z, W) + B)
-        dz_dt = jnp.matmul(h, U).mean(0)
-        return dz_dt[:, i].sum(0)
+    def setup(self):
+        self.dz_dt_func = DZDT(self.in_out_dim, self.width)
 
-
-    @linen.compact
-    def __call__(self, t, states):
-        z, logp_z = states
-
-        batchsize = z.shape[0]
-        W, B, U = HyperNetwork(self.in_out_dim, self.hidden_dim, self.width)(t)
-        Z = jnp.expand_dims(z, 0).tile((self.width, 1, 1))
-        h = jnp.tanh(jnp.matmul(Z, W) + B)
-        dz_dt = jnp.matmul(h, U).mean(0)
-        test_func_grad = jax.grad(CNF._test_func)
-        sum_diag = 0
-        for i in range(z.shape[1]):
-            sum_diag = test_func_grad(z, W, B, U, self.width, 0)[:, i]
-        # dlogp_z_dt = -trace_df_dz(dz_dt, z).view(batchsize, 1)
-        dlogp_z_dt = sum_diag
-
-        return (dz_dt, dlogp_z_dt)
+    def __call__(self, states, t):
+        Z, logp_z = states
+        dz_dt = self.dz_dt_func(Z, t)
+        df_dz = jax.jacrev(self.dz_dt_func)(Z, t)
+        dlogp_z_dt = -jnp.trace(df_dz)
+        return dz_dt, dlogp_z_dt
 
 
 class HyperNetwork(linen.Module):
@@ -131,18 +125,18 @@ class RunningAverageMeter(object):
 
 def get_batch(num_samples):
     points, _ = make_circles(n_samples=num_samples, noise=0.06, factor=0.5)
-    x = jnp.array(points, dtype=jnp.float32)
-    logp_diff_t1 = jnp.zeros((num_samples, 1), dtype=jnp.float32)
+    x = jnp.array(points, dtype=jnp.float32)[0,:]
+    logp_diff_t1 = jnp.zeros((num_samples, 1), dtype=jnp.float32)[0,:]
 
     return(x, logp_diff_t1)
 
 
 if __name__ == '__main__':
-    t0 = 0
-    t1 = 10
+    t0 = 0.
+    t1 = 10.
 
     # model
-    cnf = CNF(in_out_dim=2, hidden_dim=args.hidden_dim, width=args.width)
+    cnf = CNF(in_out_dim=2, width=args.width)
     p_z0_mean = jnp.zeros((2,))
     p_z0_covariance_matrix = jnp.array([[0.1, 0.0], [0.0, 0.1]]) 
     """
@@ -168,26 +162,27 @@ if __name__ == '__main__':
     try:
         def loss(params, batch):
             x, logp_diff_t1 = batch
-            def cnf_func(t, states):
-                print(states)
-                return cnf.apply(params, t, states)
+            cnf_func = partial(cnf.apply, params)
+            start_end_times = jnp.array([t0, t1])
             z_t, logp_diff_t = odeint(
                 cnf_func,
                 (x, logp_diff_t1),
-                jnp.array([t1, t0], dtype=jnp.float32),
+                start_end_times,
                 atol=1e-5,
                 rtol=1e-5,
             )
 
             z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
             # logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
-            logp_x = jax.scipy.stats.multivariate_normal.log_pdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_diff_t0.reshape(-1)
+            z_t0_prior_matching_loss = jax.scipy.stats.multivariate_normal.logpdf(z_t0, p_z0_mean, p_z0_covariance_matrix)
+            print(z_t0_prior_matching_loss)
+            logp_x = z_t0_prior_matching_loss - logp_diff_t0.reshape(-1)
             return -logp_x.mean(0)
 
-        cnf_params = cnf.init(jax.random.PRNGKey(0), jnp.array([0]), (jnp.ones((args.num_samples, 2)), jnp.ones((args.num_samples, 1))))
+        cnf_params = cnf.init(jax.random.PRNGKey(0), (jnp.ones((2,)), jnp.ones((1,))), jnp.array([0.]))
         x, logp_diff_t1 = get_batch(args.num_samples)
         optimizer = optax.adam(learning_rate=args.lr)
-        optimizer.init(cnf_params)
+        opt_state = optimizer.init(cnf_params)
         loss_grad_fn = jax.value_and_grad(loss)
 
         for itr in range(1, args.niters + 1):
