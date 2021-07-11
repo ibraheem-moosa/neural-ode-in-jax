@@ -126,9 +126,8 @@ class RunningAverageMeter(object):
 def get_batch(num_samples):
     points, _ = make_circles(n_samples=num_samples, noise=0.06, factor=0.5)
     x = jnp.array(points, dtype=jnp.float32)[0,:]
-    logp_diff_t1 = jnp.zeros((num_samples, 1), dtype=jnp.float32)[0,:]
 
-    return(x, logp_diff_t1)
+    return x
 
 
 if __name__ == '__main__':
@@ -137,14 +136,6 @@ if __name__ == '__main__':
 
     # model
     cnf = CNF(in_out_dim=2, width=args.width)
-    p_z0_mean = jnp.zeros((2,))
-    p_z0_covariance_matrix = jnp.array([[0.1, 0.0], [0.0, 0.1]]) 
-    """
-    p_z0 = torch.distributions.MultivariateNormal(
-        loc=torch.tensor([0.0, 0.0]).to(device),
-        covariance_matrix=torch.tensor([[0.1, 0.0], [0.0, 0.1]]).to(device)
-    )
-    """
     loss_meter = RunningAverageMeter()
 
     """
@@ -160,39 +151,35 @@ if __name__ == '__main__':
     """
 
     try:
-        def loss(params, batch):
-            x, logp_diff_t1 = batch
+        @jax.jit
+        def loss(params, x):
+            start_and_end_times = jnp.array([0.,1.])
+            z_t1 = x
+            logp_z_t1 = jnp.zeros((1,))
             cnf_func = partial(cnf.apply, params)
-            start_end_times = jnp.array([t0, t1])
-            z_t, logp_diff_t = odeint(
-                cnf_func,
-                (x, logp_diff_t1),
-                start_end_times,
-                atol=1e-5,
-                rtol=1e-5,
-            )
-
-            z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
-            # logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
-            z_t0_prior_matching_loss = jax.scipy.stats.multivariate_normal.logpdf(z_t0, p_z0_mean, p_z0_covariance_matrix)
-            print(z_t0_prior_matching_loss)
-            logp_x = z_t0_prior_matching_loss - logp_diff_t0.reshape(-1)
-            return -logp_x.mean(0)
+            z, logp_z = odeint(cnf_func, (z_t1, logp_z_t1), start_and_end_times, atol=1e-3, rtol=1e-3)
+            z_t0 = z[1, :]
+            p_z0_mean = jnp.zeros((2,))
+            p_z0_covariance_matrix = jnp.array([[0.1, 0.0], [0.0, 0.1]]) 
+            logp_z_t0 = logp_z[1, :]
+            logp_x = jax.scipy.stats.multivariate_normal.logpdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_z_t0
+            return -logp_x.mean() 
 
         cnf_params = cnf.init(jax.random.PRNGKey(0), (jnp.ones((2,)), jnp.ones((1,))), jnp.array([0.]))
-        x, logp_diff_t1 = get_batch(args.num_samples)
+        x = get_batch(args.num_samples)
         optimizer = optax.adam(learning_rate=args.lr)
         opt_state = optimizer.init(cnf_params)
         loss_grad_fn = jax.value_and_grad(loss)
 
         for itr in range(1, args.niters + 1):
-            x, logp_diff_t1 = get_batch(args.num_samples)
-            loss_val, grads = loss_grad_fn(cnf_params, (x, logp_diff_t1))
+            x = get_batch(args.num_samples)
+            loss_val, grads = loss_grad_fn(cnf_params, x)
             updates, opt_state = optimizer.update(grads, opt_state)
             params = optax.apply_updates(cnf_params, updates)
             loss_meter.update(loss_val.item())
 
-            print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
+            if itr % 500 == 0:
+                print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
 
     except KeyboardInterrupt:
         if args.train_dir is not None:

@@ -4,6 +4,7 @@ import flax
 from flax import linen
 from jax.experimental.ode import odeint
 from functools import partial
+from sklearn.datasets import make_circles
 
 
 class HyperNetwork(linen.Module):
@@ -85,6 +86,7 @@ cnf = CNF(in_out_dim, width)
 params = cnf.init(cnf_init_key, (Z, logp_Z), t)
 y = cnf.apply(params, (Z, logp_Z), t)
 
+@jax.jit
 def loss(params, x):
     start_and_end_times = jnp.array([0.,1.])
     z_t1 = x
@@ -92,13 +94,22 @@ def loss(params, x):
     cnf_func = partial(cnf.apply, params)
     z, logp_z = odeint(cnf_func, (z_t1, logp_z_t1), start_and_end_times, atol=1e-3, rtol=1e-3)
     z_t0 = z[1, :]
+    p_z0_mean = jnp.zeros((2,))
+    p_z0_covariance_matrix = jnp.array([[0.1, 0.0], [0.0, 0.1]]) 
     logp_z_t0 = logp_z[1, :]
-    logp_x = jax.scipy.stats.multivariate_normal.logpdf(z_t0, p_z0_mean, p_z0_covariance_matrix)
+    logp_x = jax.scipy.stats.multivariate_normal.logpdf(z_t0, p_z0_mean, p_z0_covariance_matrix) - logp_z_t0
     return -logp_x.mean() 
 
 
-print(loss(params, Z))
+points, _ = make_circles(n_samples=100, noise=0.06, factor=0.5)
+total_loss = 0.
+for i in range(100):
+    point = jnp.array(points[i])
+    current_loss = loss(params, point)
+    total_loss += current_loss
+    print(current_loss)
 
+print('Total loss: {}'.format(total_loss))
 # Z = jnp.ones((batch_size, in_out_dim,))
 # logp_Z = jnp.zeros((batch_size, 1,))
 # print(cnf.apply(params, (Z, logp_Z), t))
