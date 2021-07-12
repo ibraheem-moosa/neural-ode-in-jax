@@ -24,7 +24,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--adjoint', action='store_true')
 parser.add_argument('--viz', action='store_true')
 parser.add_argument('--niters', type=int, default=1000)
-parser.add_argument('--lr', type=float, default=1e-5)
+parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--num_samples', type=int, default=512)
 parser.add_argument('--width', type=int, default=64)
 parser.add_argument('--hidden_dim', type=int, default=32)
@@ -51,7 +51,9 @@ class DZDT(linen.Module):
 
     @linen.compact
     def __call__(self, Z, t):
-        params = jnp.hstack([Z, t])
+        print(Z, Z.shape, t, t.shape)
+        # params = jnp.concatenate([Z, t], axis=0)
+        params = Z + t
         params = jnp.tanh(linen.Dense(self.width)(params))
         params = jnp.tanh(linen.Dense(self.width)(params))
         params = linen.Dense(self.in_out_dim)(params)
@@ -70,38 +72,6 @@ class CNF(linen.Module):
         df_dz = jax.jacrev(self.dz_dt_func)(Z, t)
         dlogp_z_dt = -jnp.trace(df_dz)
         return dz_dt, dlogp_z_dt
-
-
-class HyperNetwork(linen.Module):
-    in_out_dim: int
-    hidden_dim: int
-    width: int
-    """Hyper-network allowing f(z(t), t) to change with time.
-
-    Adapted from the NumPy implementation at:
-    https://gist.github.com/rtqichen/91924063aa4cc95e7ef30b3a5491cc52
-    """
-
-    @linen.compact
-    def __call__(self, t):
-        blocksize = self.width * self.in_out_dim
-        # predict params
-        params = t.reshape(1, 1)
-        params = jnp.tanh(linen.Dense(self.hidden_dim)(params))
-        params = jnp.tanh(linen.Dense(self.hidden_dim)(params))
-        params = linen.Dense(3 * blocksize + self.width)(params)
-
-        # restructure
-        params = params.reshape(-1)
-        W = params[:blocksize].reshape(self.width, self.in_out_dim, 1)
-
-        U = params[blocksize:2 * blocksize].reshape(self.width, 1, self.in_out_dim)
-
-        G = params[2 * blocksize:3 * blocksize].reshape(self.width, 1, self.in_out_dim)
-        U = U * jax.nn.sigmoid(G)
-
-        B = params[3 * blocksize:].reshape(self.width, 1, 1)
-        return [W, B, U]
 
 
 class RunningAverageMeter(object):
@@ -125,8 +95,7 @@ class RunningAverageMeter(object):
 
 def get_batch(num_samples):
     points, _ = make_circles(n_samples=num_samples, noise=0.06, factor=0.5)
-    x = jnp.array(points, dtype=jnp.float32)[0,:]
-
+    x = jnp.array(points, dtype=jnp.float32)
     return x
 
 
@@ -151,7 +120,7 @@ if __name__ == '__main__':
     """
 
     try:
-        @jax.jit
+        # @jax.jit
         def loss(params, x):
             start_and_end_times = jnp.array([0.,1.])
             z_t1 = x
@@ -166,20 +135,22 @@ if __name__ == '__main__':
             return -logp_x.mean() 
 
         cnf_params = cnf.init(jax.random.PRNGKey(0), (jnp.ones((2,)), jnp.ones((1,))), jnp.array([0.]))
-        x = get_batch(args.num_samples)
+        x = get_batch(args.num_samples)[0,:]
         optimizer = optax.adam(learning_rate=args.lr)
         opt_state = optimizer.init(cnf_params)
+        # loss = jax.vmap(loss, in_axes=(None, 0))
+        # loss_grad_fn = jax.value_and_grad(lambda params, x: loss(params, x).mean())
         loss_grad_fn = jax.value_and_grad(loss)
 
         for itr in range(1, args.niters + 1):
-            x = get_batch(args.num_samples)
+            x = get_batch(args.num_samples)[0,:]
             loss_val, grads = loss_grad_fn(cnf_params, x)
             updates, opt_state = optimizer.update(grads, opt_state)
             params = optax.apply_updates(cnf_params, updates)
             loss_meter.update(loss_val.item())
 
-            if itr % 500 == 0:
-                print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
+            # if itr % 500 == 0:
+            print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
 
     except KeyboardInterrupt:
         if args.train_dir is not None:
